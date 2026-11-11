@@ -10,6 +10,9 @@
 #include <functional>
 #include <memory>
 #include <chrono>
+#include <fstream>
+#include <sstream>
+#include <ctime>
 #include <cstring>
 #include <cerrno>
 #include <csignal>
@@ -54,6 +57,73 @@ struct ServerMetrics {
 static ServerMetrics g_metrics;
 
 // =============================================================================
+// LOGGING SYSTEM (Thread-Safe Loglama)
+// =============================================================================
+enum class LogLevel {
+    DEBUG,
+    INFO,
+    WARNING,
+    LOG_ERROR
+};
+
+class Logger {
+public:
+    static Logger& get_instance() {
+        static Logger instance;
+        return instance;
+    }
+
+    void set_log_file(const std::string& filename) {
+        std::lock_guard<std::mutex> lock(log_mutex_);
+        if (file_stream_.is_open()) file_stream_.close();
+        file_stream_.open(filename, std::ios::app);
+    }
+
+    void log(LogLevel level, const std::string& message) {
+        std::lock_guard<std::mutex> lock(log_mutex_);
+
+        auto now = std::chrono::system_clock::now();
+        auto in_time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+
+        std::ostringstream ss;
+        ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%d %H:%M:%S")
+           << '.' << std::setfill('0') << std::setw(3) << ms.count();
+
+        std::string level_str;
+        switch (level) {
+            case LogLevel::DEBUG:     level_str = "[DEBUG]  "; break;
+            case LogLevel::INFO:      level_str = "[INFO]   "; break;
+            case LogLevel::WARNING:   level_str = "[WARN]   "; break;
+            case LogLevel::LOG_ERROR: level_str = "[ERROR]  "; break;
+        }
+
+        std::string log_entry = "[" + ss.str() + "] " + level_str + message;
+
+        if (file_stream_.is_open()) {
+            file_stream_ << log_entry << std::endl;
+        }
+    }
+
+private:
+    Logger() = default;
+    ~Logger() {
+        if (file_stream_.is_open()) file_stream_.close();
+    }
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
+
+    std::mutex log_mutex_;
+    std::ofstream file_stream_;
+};
+
+#define LOG_DEBUG(msg) Logger::get_instance().log(LogLevel::DEBUG, msg)
+#define LOG_INFO(msg)  Logger::get_instance().log(LogLevel::INFO, msg)
+#define LOG_WARN(msg)  Logger::get_instance().log(LogLevel::WARNING, msg)
+#define LOG_ERROR(msg) Logger::get_instance().log(LogLevel::LOG_ERROR, msg)
+
+// =============================================================================
 // 1. BELLEK YÖNETİMİ: Sabit Bloklu Custom Memory Pool (Slab-Style)
 // =============================================================================
 class MemoryPool {
@@ -75,6 +145,7 @@ public:
         std::lock_guard<std::mutex> lock(pool_mutex_);
         if (free_list_.empty()) {
             fallback_allocations_++;
+            LOG_WARN("Memory Pool kapasitesi doldu! Heap üzerinden dinamik alan tahsis edildi.");
             return new char[block_size_];
         }
         char* block = free_list_.back();
@@ -186,7 +257,6 @@ private:
             bool found_task = false;
             bool was_stolen = false;
 
-            // 1. Kendi yerel kuyruğundan al
             {
                 std::lock_guard<std::mutex> lock(queues_[my_id].mutex);
                 if (!queues_[my_id].tasks.empty()) {
@@ -196,7 +266,6 @@ private:
                 }
             }
 
-            // 2. İş yoksa diğer worker'ların kuyruğundan iş çal (Work-Stealing)
             if (!found_task) {
                 size_t num_queues = queues_.size();
                 for (size_t offset = 1; offset < num_queues; ++offset) {
@@ -307,14 +376,16 @@ private:
 };
 
 // =============================================================================
-// 4. HTTP İSTEK İŞLEYİCİ
+// 4. HTTP İSTEK İŞLEYİCİ (Güncellenmiş & Güvenli)
 // =============================================================================
 void handle_client(int client_fd, MemoryPool& memory_pool) {
     g_metrics.active_connections++;
     PooledBuffer buffer(memory_pool);
 
     ssize_t total_bytes_read = 0;
-    while (true) {
+    int timeout_count = 0;
+
+    while (total_bytes_read < static_cast<ssize_t>(buffer.capacity() - 1)) {
         ssize_t bytes = read(client_fd, buffer.get() + total_bytes_read, buffer.capacity() - total_bytes_read - 1);
         if (bytes > 0) {
             total_bytes_read += bytes;
@@ -329,12 +400,14 @@ void handle_client(int client_fd, MemoryPool& memory_pool) {
                 struct pollfd pfd;
                 pfd.fd = client_fd;
                 pfd.events = POLLIN;
-                int ret = poll(&pfd, 1, 100);
+                int ret = poll(&pfd, 1, 50);
                 if (ret > 0 && (pfd.revents & POLLIN)) {
                     continue;
                 }
-                break;
+                if (++timeout_count > 5) break;
+                continue;
             }
+            LOG_ERROR("Socket okuma hatasi (fd: " + std::to_string(client_fd) + "): " + std::string(strerror(errno)));
             break;
         }
     }
@@ -342,19 +415,19 @@ void handle_client(int client_fd, MemoryPool& memory_pool) {
     if (total_bytes_read > 0) {
         g_metrics.total_requests++;
 
-        const char response_headers[] = 
+        std::string response = 
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html; charset=UTF-8\r\n"
-            "Content-Length: 104\r\n"
+            "Content-Length: 95\r\n"
             "Connection: close\r\n"
             "\r\n"
             "<!DOCTYPE html><html><body><h1>200 OK</h1><p>Multi-threaded Server Calisiyor.</p></body></html>";
         
-        size_t to_send = sizeof(response_headers) - 1;
+        size_t to_send = response.size();
         size_t total_sent = 0;
 
         while (total_sent < to_send) {
-            ssize_t sent = write(client_fd, response_headers + total_sent, to_send - total_sent);
+            ssize_t sent = write(client_fd, response.c_str() + total_sent, to_send - total_sent);
             if (sent > 0) {
                 total_sent += sent;
             } else if (sent < 0) {
@@ -365,6 +438,7 @@ void handle_client(int client_fd, MemoryPool& memory_pool) {
                     poll(&pfd, 1, 50);
                     continue;
                 }
+                LOG_ERROR("Socket yazma hatasi (fd: " + std::to_string(client_fd) + "): " + std::string(strerror(errno)));
                 break;
             } else {
                 break;
@@ -374,8 +448,6 @@ void handle_client(int client_fd, MemoryPool& memory_pool) {
     }
 
     shutdown(client_fd, SHUT_WR);
-    char drain[256];
-    while (read(client_fd, drain, sizeof(drain)) > 0) {}
     close(client_fd);
     g_metrics.active_connections--;
 }
@@ -392,7 +464,6 @@ struct SystemStats {
     uint64_t disk_used_bytes = 0;
 };
 
-// Donanım metriklerini toplayan yardımcı sınıf
 class HardwareSampler {
 public:
     HardwareSampler() {
@@ -403,7 +474,6 @@ public:
     SystemStats sample() {
         SystemStats stats;
 
-        // 1. CPU Kullanımı Hesaplama
         auto now = std::chrono::steady_clock::now();
         double wall_time_ms = std::chrono::duration<double, std::milli>(now - last_sample_time_).count();
         double current_cpu_time = get_process_cpu_time_ms();
@@ -419,7 +489,6 @@ public:
         last_sample_time_ = now;
         last_cpu_time_ = current_cpu_time;
 
-        // 2. RAM (Bellek) Kullanımı
 #if defined(__APPLE__)
         mach_task_basic_info info;
         mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
@@ -445,7 +514,6 @@ public:
         }
 #endif
 
-        // 3. Storage (Disk Alanı) Kullanımı
         struct statvfs vfs;
         if (statvfs(".", &vfs) == 0) {
             stats.disk_total_bytes = static_cast<uint64_t>(vfs.f_blocks) * vfs.f_frsize;
@@ -471,7 +539,6 @@ private:
     }
 };
 
-// ANSI İlerleme Çubuğu Çizen Yardımcı
 std::string render_progress_bar(double pct, int bar_width = 24) {
     if (pct < 0.0) pct = 0.0;
     if (pct > 100.0) pct = 100.0;
@@ -487,7 +554,6 @@ std::string render_progress_bar(double pct, int bar_width = 24) {
     return bar;
 }
 
-// Canlı Terminal Dashboard Döngüsü
 void run_cli_dashboard(MemoryPool& mem_pool, WorkStealingThreadPool& thread_pool, std::atomic<bool>& running) {
     HardwareSampler sampler;
     uint64_t last_requests = 0;
@@ -511,35 +577,28 @@ void run_cli_dashboard(MemoryPool& mem_pool, WorkStealingThreadPool& thread_pool
         int uptime_m = (total_uptime_sec % 3600) / 60;
         int uptime_s = total_uptime_sec % 60;
 
-        // Bellek Havuzu İstatistikleri
         size_t used_pool_blocks = mem_pool.get_used_blocks();
         size_t total_pool_blocks = mem_pool.get_total_blocks();
         double pool_pct = (total_pool_blocks > 0) ? (static_cast<double>(used_pool_blocks) / total_pool_blocks) * 100.0 : 0.0;
-
-        // Storage Yüzdesi
         double disk_pct = (stats.disk_total_bytes > 0) ? (static_cast<double>(stats.disk_used_bytes) / stats.disk_total_bytes) * 100.0 : 0.0;
 
-        // ANSI Terminali Temizleme ve Başa Alma
         std::cout << "\033[H\033[J";
 
         std::cout << "\033[1;36m╔══════════════════════════════════════════════════════════════════════════╗\033[0m\n";
         std::cout << "\033[1;36m║     ⚡ HIGH-PERFORMANCE MULTI-THREADED HTTP SERVER LIVE DASHBOARD ⚡     ║\033[0m\n";
         std::cout << "\033[1;36m╚══════════════════════════════════════════════════════════════════════════╝\033[0m\n";
 
-        // Uptime & Genel Durum
         std::cout << " \033[1;33m● Port:\033[0m " << PORT 
                   << "  |  \033[1;33m● Uptime:\033[0m " << std::setfill('0') << std::setw(2) << uptime_h << ":" 
                   << std::setfill('0') << std::setw(2) << uptime_m << ":" 
                   << std::setfill('0') << std::setw(2) << uptime_s
                   << "  |  \033[1;33m● Aktif Bağlantı:\033[0m " << g_metrics.active_connections.load() << "\n\n";
 
-        // 1. CPU KULLANIMI
         std::cout << "\033[1;32m[CPU & İŞ PARÇACIKLARI]\033[0m\n";
         std::cout << "  Process CPU:  " << render_progress_bar(stats.cpu_usage_pct) 
                   << " " << std::fixed << std::setprecision(1) << stats.cpu_usage_pct << " %\n";
         std::cout << "  Worker Threads: " << thread_pool.get_worker_count() << " aktif işçi çekirdeği\n\n";
 
-        // 2. RAM (BELLEK) KULLANIMI
         double rss_mb = stats.memory_rss_bytes / (1024.0 * 1024.0);
         double sys_ram_gb = stats.system_total_ram_bytes / (1024.0 * 1024.0 * 1024.0);
         std::cout << "\033[1;35m[RAM & BELLEK YÖNETİMİ]\033[0m\n";
@@ -551,7 +610,6 @@ void run_cli_dashboard(MemoryPool& mem_pool, WorkStealingThreadPool& thread_pool
                   << std::fixed << std::setprecision(1) << pool_pct << " %)\n";
         std::cout << "  Pool Rezerv:  " << (total_pool_blocks * mem_pool.get_block_size()) / 1024 << " KB Sabit Blok Havuzu\n\n";
 
-        // 3. STORAGE (DİSK) KULLANIMI
         double disk_used_gb = stats.disk_used_bytes / (1024.0 * 1024.0 * 1024.0);
         double disk_total_gb = stats.disk_total_bytes / (1024.0 * 1024.0 * 1024.0);
         std::cout << "\033[1;34m[STORAGE / DİSK KULLANIMI]\033[0m\n";
@@ -559,13 +617,11 @@ void run_cli_dashboard(MemoryPool& mem_pool, WorkStealingThreadPool& thread_pool
                   << " " << std::fixed << std::setprecision(1) << disk_used_gb << " GB / " 
                   << disk_total_gb << " GB (" << disk_pct << " %)\n\n";
 
-        // 4. WORK-STEALING & LOAD BALANCING
         std::cout << "\033[1;33m[LOAD BALANCING & WORK-STEALING]\033[0m\n";
         std::cout << "  Yerel Görevler (Local):   " << thread_pool.get_local_tasks() << "\n";
         std::cout << "  Çalınan Görevler (Stolen): " << thread_pool.get_stolen_tasks() 
                   << " \033[90m(Kuyruk dengeleme)\033[0m\n\n";
 
-        // 5. AĞ & HTTP VERİLERİ
         double mb_sent = g_metrics.bytes_sent.load() / (1024.0 * 1024.0);
         std::cout << "\033[1;37m[AĞ & HTTP TRAFİĞİ]\033[0m\n";
         std::cout << "  Toplam İstek (Total):     " << g_metrics.total_requests.load() << " istek\n";
@@ -582,18 +638,20 @@ void run_cli_dashboard(MemoryPool& mem_pool, WorkStealingThreadPool& thread_pool
 int main() {
     signal(SIGPIPE, SIG_IGN);
 
-    // 1. Custom Memory Pool (512 blok x 8KB = 4 MB pre-allocated)
-    MemoryPool memory_pool(POOL_BLOCK_SIZE, POOL_BLOCK_COUNT);
+    Logger::get_instance().set_log_file("server.log");
+    LOG_INFO("HTTP Sunucu baslatiliyor... Port: " + std::to_string(PORT));
 
-    // 2. Thread Pool (İşlemci çekirdeği kadar worker)
+    MemoryPool memory_pool(POOL_BLOCK_SIZE, POOL_BLOCK_COUNT);
+    LOG_INFO("Memory Pool olusturuldu (4 MB pre-allocated).");
+
     unsigned int hardware_threads = std::thread::hardware_concurrency();
     size_t thread_count = (hardware_threads > 0) ? hardware_threads : 8;
     WorkStealingThreadPool thread_pool(thread_count);
+    LOG_INFO("Work-Stealing Thread Pool baslatildi. Worker sayisi: " + std::to_string(thread_count));
 
-    // 3. Server Socket
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
-        std::cerr << "Socket hatası: " << strerror(errno) << std::endl;
+        LOG_ERROR("Socket olusturma hatasi: " + std::string(strerror(errno)));
         return 1;
     }
 
@@ -606,32 +664,30 @@ int main() {
     server_addr.sin_port = htons(PORT);
 
     if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        std::cerr << "Bind hatası: " << strerror(errno) << std::endl;
+        LOG_ERROR("Bind hatasi: " + std::string(strerror(errno)));
         close(server_fd);
         return 1;
     }
 
     if (listen(server_fd, 4096) < 0) {
-        std::cerr << "Listen hatası: " << strerror(errno) << std::endl;
+        LOG_ERROR("Listen hatasi: " + std::string(strerror(errno)));
         close(server_fd);
         return 1;
     }
 
     if (!set_non_blocking(server_fd)) {
-        std::cerr << "Server socket non-blocking yapılamadı!\n";
+        LOG_ERROR("Server socket non-blocking yapilamadi!");
         close(server_fd);
         return 1;
     }
 
-    // 4. Reactor Event Loop
     EventReactor reactor;
     reactor.add_socket(server_fd);
+    LOG_INFO("Event Reactor döngüsü hazırlandı.");
 
-    // 5. Canlı CLI Dashboard Thread'ini Başlat
     std::atomic<bool> dashboard_running{true};
     std::thread dashboard_thread(run_cli_dashboard, std::ref(memory_pool), std::ref(thread_pool), std::ref(dashboard_running));
 
-    // 6. Olay Dinleme Döngüsü (Event Loop)
     while (true) {
         std::vector<int> ready_fds = reactor.poll_events(1000);
 
@@ -646,6 +702,7 @@ int main() {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
                             break;
                         }
+                        LOG_ERROR("Accept hatasi: " + std::string(strerror(errno)));
                         break;
                     }
 
@@ -667,5 +724,6 @@ int main() {
     }
 
     close(server_fd);
+    LOG_INFO("Sunucu kapatildi.");
     return 0;
 }
