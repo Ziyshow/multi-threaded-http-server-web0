@@ -1,5 +1,18 @@
 # C++ High-Performance Multi-Threaded HTTP Server (v0.7)
 
+## 🏫 Proje Bilgileri (COME 361 - Operating Systems Concepts)
+
+* **Grup Adı:** WEB O
+* **Grup Üyeleri:**
+  * Ziya Gürkan Gendek (`202303001061`)
+  * Ziya Anıl Alpaslan (`202303001064`)
+  * Muhammed Ali İşen (`202303001136`)
+
+### 📂 Modül Dağılımı ve Sorumluluklar
+Proje iş yükü ekip içerisinde 3 ana modüle bölünmüştür:
+1. **Network ve HTTP Katmanı:** TCP soket yönetimi, non-blocking I/O ve Reactor (`epoll` / `kqueue`) yapısı.
+2. **Thread Pool ve Senkronizasyon:** Work-Stealing mekanizması, `mutex`, `condition_variable` tabanlı eşzamanlı istek yönetimi ve *graceful shutdown*.
+3. **File Server, Logging ve Benchmark:** Thread-safe loglama, özel slab bellek havuzu (`MemoryPool`) ve canlı CLI sistem izleme paneli.
 This project has been transformed from a basic single-threaded, blocking server into a high-concurrency, modern HTTP server architecture utilizing the **Reactor Pattern (Non-blocking I/O)**, a **Work-Stealing Thread Pool**, a **Custom Slab-Style Memory Pool**, and a **Real-Time Terminal Hardware CLI Dashboard**.
 
 ---
