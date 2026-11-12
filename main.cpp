@@ -44,6 +44,14 @@ constexpr int MAX_EVENTS = 256;
 constexpr size_t POOL_BLOCK_SIZE = 8192; // 8 KB sabit buffer boyutu
 constexpr size_t POOL_BLOCK_COUNT = 512; // 512 blok (4 MB önceden ayrılmış alan)
 
+// Sinyal yönetimi ve sunucu durumu
+static std::atomic<bool> g_server_running{true};
+
+void handle_signal(int sig) {
+    (void)sig;
+    g_server_running = false;
+}
+
 // =============================================================================
 // GLOBAL METRİKLER (Server Statistics)
 // =============================================================================
@@ -554,14 +562,27 @@ std::string render_progress_bar(double pct, int bar_width = 24) {
     return bar;
 }
 
+// Terminal durumunu yöneten RAII yapısı (Alternate Screen & Cursor Control)
+struct TerminalSessionGuard {
+    TerminalSessionGuard() {
+        // Alternatif ekrana geç (scrollback'i kilitler) ve imleci gizle
+        std::cout << "\033[?1049h\033[?25l" << std::flush;
+    }
+    ~TerminalSessionGuard() {
+        // İmleci tekrar görünür yap ve normal terminal ekranına geri dön
+        std::cout << "\033[?25h\033[?1049l" << std::flush;
+    }
+};
+
 void run_cli_dashboard(MemoryPool& mem_pool, WorkStealingThreadPool& thread_pool, std::atomic<bool>& running) {
+    TerminalSessionGuard term_guard;
     HardwareSampler sampler;
     uint64_t last_requests = 0;
     auto last_time = std::chrono::steady_clock::now();
 
-    while (running.load()) {
+    while (running.load() && g_server_running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-        if (!running.load()) break;
+        if (!running.load() || !g_server_running.load()) break;
 
         SystemStats stats = sampler.sample();
 
@@ -582,53 +603,65 @@ void run_cli_dashboard(MemoryPool& mem_pool, WorkStealingThreadPool& thread_pool
         double pool_pct = (total_pool_blocks > 0) ? (static_cast<double>(used_pool_blocks) / total_pool_blocks) * 100.0 : 0.0;
         double disk_pct = (stats.disk_total_bytes > 0) ? (static_cast<double>(stats.disk_used_bytes) / stats.disk_total_bytes) * 100.0 : 0.0;
 
-        std::cout << "\033[H\033[J";
-
-        std::cout << "\033[1;36m╔══════════════════════════════════════════════════════════════════════════╗\033[0m\n";
-        std::cout << "\033[1;36m║     ⚡ HIGH-PERFORMANCE MULTI-THREADED HTTP SERVER LIVE DASHBOARD ⚡     ║\033[0m\n";
-        std::cout << "\033[1;36m╚══════════════════════════════════════════════════════════════════════════╝\033[0m\n";
-
-        std::cout << " \033[1;33m● Port:\033[0m " << PORT 
-                  << "  |  \033[1;33m● Uptime:\033[0m " << std::setfill('0') << std::setw(2) << uptime_h << ":" 
-                  << std::setfill('0') << std::setw(2) << uptime_m << ":" 
-                  << std::setfill('0') << std::setw(2) << uptime_s
-                  << "  |  \033[1;33m● Aktif Bağlantı:\033[0m " << g_metrics.active_connections.load() << "\n\n";
-
-        std::cout << "\033[1;32m[CPU & İŞ PARÇACIKLARI]\033[0m\n";
-        std::cout << "  Process CPU:  " << render_progress_bar(stats.cpu_usage_pct) 
-                  << " " << std::fixed << std::setprecision(1) << stats.cpu_usage_pct << " %\n";
-        std::cout << "  Worker Threads: " << thread_pool.get_worker_count() << " aktif işçi çekirdeği\n\n";
-
         double rss_mb = stats.memory_rss_bytes / (1024.0 * 1024.0);
         double sys_ram_gb = stats.system_total_ram_bytes / (1024.0 * 1024.0 * 1024.0);
-        std::cout << "\033[1;35m[RAM & BELLEK YÖNETİMİ]\033[0m\n";
-        std::cout << "  Process RSS:  " << std::fixed << std::setprecision(2) << rss_mb << " MB";
-        if (sys_ram_gb > 0) std::cout << " (Toplam Sistem RAM: " << sys_ram_gb << " GB)";
-        std::cout << "\n";
-        std::cout << "  Memory Pool:  " << render_progress_bar(pool_pct) 
-                  << " " << used_pool_blocks << "/" << total_pool_blocks << " blok (" 
-                  << std::fixed << std::setprecision(1) << pool_pct << " %)\n";
-        std::cout << "  Pool Rezerv:  " << (total_pool_blocks * mem_pool.get_block_size()) / 1024 << " KB Sabit Blok Havuzu\n\n";
-
         double disk_used_gb = stats.disk_used_bytes / (1024.0 * 1024.0 * 1024.0);
         double disk_total_gb = stats.disk_total_bytes / (1024.0 * 1024.0 * 1024.0);
-        std::cout << "\033[1;34m[STORAGE / DİSK KULLANIMI]\033[0m\n";
-        std::cout << "  Disk Alanı:   " << render_progress_bar(disk_pct) 
-                  << " " << std::fixed << std::setprecision(1) << disk_used_gb << " GB / " 
-                  << disk_total_gb << " GB (" << disk_pct << " %)\n\n";
-
-        std::cout << "\033[1;33m[LOAD BALANCING & WORK-STEALING]\033[0m\n";
-        std::cout << "  Yerel Görevler (Local):   " << thread_pool.get_local_tasks() << "\n";
-        std::cout << "  Çalınan Görevler (Stolen): " << thread_pool.get_stolen_tasks() 
-                  << " \033[90m(Kuyruk dengeleme)\033[0m\n\n";
-
         double mb_sent = g_metrics.bytes_sent.load() / (1024.0 * 1024.0);
-        std::cout << "\033[1;37m[AĞ & HTTP TRAFİĞİ]\033[0m\n";
-        std::cout << "  Toplam İstek (Total):     " << g_metrics.total_requests.load() << " istek\n";
-        std::cout << "  Anlık Hız (Throughput):    " << std::fixed << std::setprecision(1) << rps << " req/sec (RPS)\n";
-        std::cout << "  Gönderilen Veri (Sent):   " << std::fixed << std::setprecision(2) << mb_sent << " MB\n";
-        std::cout << "\033[1;36m──────────────────────────────────────────────────────────────────────────\033[0m\n";
-        std::cout << " \033[90mÇıkış için Ctrl+C tuşlarına basabilirsiniz.\033[0m" << std::endl;
+
+        // Tüm ekranı tek bir tamponda (buffer) hazırla: Flicker ve scroll'u sıfıra indirir
+        std::ostringstream out;
+        out << "\033[1;1H"; // İmleci en sol üst köşeye (1, 1) sabitle
+
+        // Başlık Kutusu (Sabit kalır, yerinde durur)
+        out << "\033[1;36m╔══════════════════════════════════════════════════════════════════════════╗\033[0m\033[K\n";
+        out << "\033[1;36m║     ⚡ HIGH-PERFORMANCE MULTI-THREADED HTTP SERVER LIVE DASHBOARD ⚡     ║\033[0m\033[K\n";
+        out << "\033[1;36m╚══════════════════════════════════════════════════════════════════════════╝\033[0m\033[K\n";
+
+        // Durum & Uptime
+        out << " \033[1;33m● Port:\033[0m " << PORT 
+            << "  |  \033[1;33m● Uptime:\033[0m " << std::setfill('0') << std::setw(2) << uptime_h << ":" 
+            << std::setfill('0') << std::setw(2) << uptime_m << ":" 
+            << std::setfill('0') << std::setw(2) << uptime_s
+            << "  |  \033[1;33m● Aktif Bağlantı:\033[0m " << g_metrics.active_connections.load() << "\033[K\n\n";
+
+        // 1. CPU & THREADS
+        out << "\033[1;32m[CPU & İŞ PARÇACIKLARI]\033[0m\033[K\n";
+        out << "  Process CPU:    " << render_progress_bar(stats.cpu_usage_pct, 20) 
+            << " " << std::fixed << std::setprecision(1) << stats.cpu_usage_pct << " %"
+            << " (" << thread_pool.get_worker_count() << " aktif worker)\033[K\n";
+
+        // 2. RAM & MEMORY POOL
+        out << "\033[1;35m[RAM & BELLEK YÖNETİMİ]\033[0m\033[K\n";
+        out << "  Process RSS:    " << std::fixed << std::setprecision(2) << rss_mb << " MB";
+        if (sys_ram_gb > 0) out << " (Sistem RAM: " << sys_ram_gb << " GB)";
+        out << " | Pool: " << render_progress_bar(pool_pct, 14)
+            << " " << used_pool_blocks << "/" << total_pool_blocks << " (" << std::setprecision(1) << pool_pct << " %)\033[K\n";
+
+        // 3. STORAGE
+        out << "\033[1;34m[STORAGE / DİSK KULLANIMI]\033[0m\033[K\n";
+        out << "  Disk Alanı:     " << render_progress_bar(disk_pct, 20) 
+            << " " << std::fixed << std::setprecision(1) << disk_used_gb << " GB / " 
+            << disk_total_gb << " GB (" << disk_pct << " %)\033[K\n";
+
+        // 4. LOAD BALANCING & WORK-STEALING
+        out << "\033[1;33m[LOAD BALANCING & WORK-STEALING]\033[0m\033[K\n";
+        out << "  Yerel Görevler: " << thread_pool.get_local_tasks() 
+            << "  |  Çalınan (Stolen): " << thread_pool.get_stolen_tasks() 
+            << " \033[90m(Kuyruk dengeleme)\033[0m\033[K\n";
+
+        // 5. AĞ & HTTP TRAFİĞİ
+        out << "\033[1;37m[AĞ & HTTP TRAFİĞİ]\033[0m\033[K\n";
+        out << "  Toplam İstek:   " << g_metrics.total_requests.load() 
+            << "  |  Anlık Hız: " << std::fixed << std::setprecision(1) << rps << " RPS"
+            << "  |  Veri: " << std::fixed << std::setprecision(2) << mb_sent << " MB\033[K\n";
+
+        out << "\033[1;36m──────────────────────────────────────────────────────────────────────────\033[0m\033[K\n";
+        out << " \033[90mÇıkış yapmak için Ctrl+C tuşlarına basabilirsiniz.\033[0m\033[K\n";
+        out << "\033[J"; // Kalan alt ekran alanını temizle
+
+        // Tek seferde ekrana yaz (Atomik render)
+        std::cout << out.str() << std::flush;
     }
 }
 
@@ -637,6 +670,8 @@ void run_cli_dashboard(MemoryPool& mem_pool, WorkStealingThreadPool& thread_pool
 // =============================================================================
 int main() {
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     Logger::get_instance().set_log_file("server.log");
     LOG_INFO("HTTP Sunucu baslatiliyor... Port: " + std::to_string(PORT));
@@ -688,8 +723,8 @@ int main() {
     std::atomic<bool> dashboard_running{true};
     std::thread dashboard_thread(run_cli_dashboard, std::ref(memory_pool), std::ref(thread_pool), std::ref(dashboard_running));
 
-    while (true) {
-        std::vector<int> ready_fds = reactor.poll_events(1000);
+    while (g_server_running.load()) {
+        std::vector<int> ready_fds = reactor.poll_events(500);
 
         for (int fd : ready_fds) {
             if (fd == server_fd) {
