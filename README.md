@@ -4,9 +4,9 @@
 
 * **Grup Adı:** WEB O
 * **Grup Üyeleri:**
-  * Ziya Gürkan Gendek (`202303001061`)
+  * Ziya Gürkan Çendek (`202303001061`)
   * Ziya Anıl Alpaslan (`202303001064`)
-  * Muhammed Ali İşen (`202303001136`)
+  * Muhammed Ali Esen (`202303001136`)
 
 ### 📂 Modül Dağılımı ve Sorumluluklar
 Proje iş yükü ekip içerisinde 3 ana modüle bölünmüştür:
