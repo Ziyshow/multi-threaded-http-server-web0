@@ -33,12 +33,12 @@ An independent background monitoring thread (`run_cli_dashboard`) samples system
 - **Work-Stealing & Balancing:** Local tasks completed vs. stolen tasks acquired from peer worker queues.
 - **Network & Throughput:** Total processed requests, real-time throughput in **Requests Per Second (RPS)**, and total bytes sent.
 
-###2.📝 Thread-Safe Logging System (Logger)
+### **2. 📝 Thread-Safe Logging System (Logger)**
 
--Singleton Architecture: Managed globally via Logger::get_instance() to ensure centralized logging across all subsystems.
--Thread Safety: Protected by std::mutex to prevent interleaved writes or data races during high-concurrency bursts.
--Log Levels: Supports DEBUG, INFO, WARNING, and LOG_ERROR severity tiers via helper macros (LOG_INFO, LOG_ERROR, etc.).
--Persistent Output & Timestamps: Writes millisecond-precision timestamps (YYYY-MM-DD HH:MM:SS.mmm) directly to server.log
+- **Singleton Architecture:** Managed globally via `Logger::get_instance()` to ensure centralized logging across all subsystems.
+- **Thread Safety:** Protected by `std::mutex` to prevent interleaved writes and data races during high-concurrency operations.
+- **Log Levels:** Supports `DEBUG`, `INFO`, `WARNING`, and `LOG_ERROR` severity levels through helper macros (`LOG_INFO`, `LOG_ERROR`, etc.).
+- **Persistent Output & Timestamps:** Writes millisecond-precision timestamps (`YYYY-MM-DD HH:MM:SS.mmm`) directly to `server.log`.
 
 ### 3. ⚡ Reactor Pattern & Non-Blocking I/O (`epoll` / `kqueue`)
 - **Non-Blocking Sockets:** All listening and connection descriptors are configured via `fcntl(fd, F_SETFL, O_NONBLOCK)` to prevent thread blocking.
