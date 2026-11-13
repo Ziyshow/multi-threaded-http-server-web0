@@ -33,7 +33,14 @@ An independent background monitoring thread (`run_cli_dashboard`) samples system
 - **Work-Stealing & Balancing:** Local tasks completed vs. stolen tasks acquired from peer worker queues.
 - **Network & Throughput:** Total processed requests, real-time throughput in **Requests Per Second (RPS)**, and total bytes sent.
 
-### 2. ⚡ Reactor Pattern & Non-Blocking I/O (`epoll` / `kqueue`)
+###2.📝 Thread-Safe Logging System (Logger)
+
+-Singleton Architecture: Managed globally via Logger::get_instance() to ensure centralized logging across all subsystems.
+-Thread Safety: Protected by std::mutex to prevent interleaved writes or data races during high-concurrency bursts.
+-Log Levels: Supports DEBUG, INFO, WARNING, and LOG_ERROR severity tiers via helper macros (LOG_INFO, LOG_ERROR, etc.).
+-Persistent Output & Timestamps: Writes millisecond-precision timestamps (YYYY-MM-DD HH:MM:SS.mmm) directly to server.log
+
+### 3. ⚡ Reactor Pattern & Non-Blocking I/O (`epoll` / `kqueue`)
 - **Non-Blocking Sockets:** All listening and connection descriptors are configured via `fcntl(fd, F_SETFL, O_NONBLOCK)` to prevent thread blocking.
 - **Cross-Platform Event Demultiplexing:**
   - **Linux:** Native `epoll` (`epoll_create1`, `epoll_ctl`, `epoll_wait` with Edge-Triggered `EPOLLET`).
@@ -41,12 +48,12 @@ An independent background monitoring thread (`run_cli_dashboard`) samples system
 - **TCP Graceful Shutdown:** Employs `shutdown(client_fd, SHUT_WR)` to deliver a clean `FIN` packet, drains trailing bytes, and closes the connection without triggering connection reset (`RST` / Errno 54) errors.
 - **Signal Handling:** Disables broken pipe signals with `signal(SIGPIPE, SIG_IGN)`.
 
-### 3. 🧵 Work-Stealing Thread Pool & Load Balancing
+### 4. 🧵 Work-Stealing Thread Pool & Load Balancing
 - **Worker Thread Pool:** Spawns a pool of worker threads sized to match available hardware cores (`std::thread::hardware_concurrency()`).
 - **Load Balancing (Round-Robin):** Incoming accepted connections are assigned evenly across worker local task queues (`std::deque`).
 - **Work-Stealing:** When a worker exhausts its own queue, it attempts to steal tasks from the back (`pop_back()`) of busy peer queues, eliminating CPU idle time and mitigating workload skew.
 
-### 4. 🧠 Memory Management: Custom Slab-Style Memory Pool
+### 5. 🧠 Memory Management: Custom Slab-Style Memory Pool
 - **Pre-Allocation:** Allocates a contiguous block of memory during startup (512 blocks × 8 KB = 4 MB buffer pool).
 - **Zero-Overhead Allocations ($O(1)$):** Client requests obtain reusable buffer blocks from an internal free-list without invoking dynamic `malloc` / `new` calls on the heap.
 - **RAII Resource Management:** The `PooledBuffer` wrapper guarantees that buffers are returned to the pool immediately upon request completion or unexpected disconnection, completely preventing memory leaks and heap fragmentation.
