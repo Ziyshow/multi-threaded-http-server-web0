@@ -1,20 +1,26 @@
 # C++ High-Performance Multi-Threaded HTTP Server (v0.7)
 
-## 🏫 Proje Bilgileri (COME 361 - Operating Systems Concepts)
+🏫 Project Information (COME 361 - Operating Systems Concepts)
 
-* **Grup Adı:** WEB O
-* **Grup Üyeleri:**
-  * Ziya Gürkan Çendek (`202303001061`)
-  * Ziya Anıl Alpaslan (`202303001064`)
-  * Muhammed Ali Esen (`202303001136`)
+-Group Name: WEB O
 
-### 📂 Modül Dağılımı ve Sorumluluklar
-Proje iş yükü ekip içerisinde 3 ana modüle bölünmüştür:
-1. **Network ve HTTP Katmanı:** TCP soket yönetimi, non-blocking I/O ve Reactor (`epoll` / `kqueue`) yapısı.
-2. **Thread Pool ve Senkronizasyon:** Work-Stealing mekanizması, `mutex`, `condition_variable` tabanlı eşzamanlı istek yönetimi ve *graceful shutdown*.
-3. **File Server, Logging ve Benchmark:** Thread-safe loglama, özel slab bellek havuzu (`MemoryPool`) ve canlı CLI sistem izleme paneli.
-This project has been transformed from a basic single-threaded, blocking server into a high-concurrency, modern HTTP server architecture utilizing the **Reactor Pattern (Non-blocking I/O)**, a **Work-Stealing Thread Pool**, a **Custom Slab-Style Memory Pool**, and a **Real-Time Terminal Hardware CLI Dashboard**.
+-Team Members:
 
+-Ziya Gürkan Çendek (202303001061)
+
+-Ziya Anıl Alpaslan (202303001064)
+
+-Muhammed Ali Esen (202303001136)
+
+📂 Module Breakdown & Responsibilities
+
+1.Network & HTTP Layer: TCP socket management, non-blocking I/O, and cross-platform Reactor (epoll / kqueue) architecture.
+
+2.Thread Pool & Synchronization: Work-stealing scheduler, mutex & condition_variable synchronization, concurrent request handling, and graceful shutdown.
+
+3.File Server, Logging & Benchmark: Thread-safe logging system, custom slab memory pool (MemoryPool), CLI hardware dashboard, and concurrency benchmarking.
+
+This project implements a high-concurrency, modern HTTP server architecture in C++17 utilizing the Reactor Pattern (Non-blocking I/O), a Work-Stealing Thread Pool, a Custom Slab-Style Memory Pool, a Thread-Safe Logging System, and a Real-Time Terminal Hardware CLI Dashboard.
 ---
 
 ## 🚀 Key Features & Architecture
